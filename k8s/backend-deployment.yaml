@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobboard-backend
+  labels:
+    app: jobboard-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: jobboard-backend
+  template:
+    metadata:
+      labels:
+        app: jobboard-backend
+    spec:
+      containers:
+      - name: backend
+        image: saikiranasamwar4/jobboard-backend:latest
+        ports:
+        - containerPort: 4000
+        env:
+        - name: DB_URI
+          valueFrom:
+            secretKeyRef:
+              name: jobboard-secrets
+              key: db_uri
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: jobboard-secrets
+              key: jwt_secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jobboard-backend
+  labels:
+    app: jobboard-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 4000
+    targetPort: 4000
+  selector:
+    app: jobboard-backend
