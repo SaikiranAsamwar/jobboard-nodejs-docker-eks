@@ -1,9 +1,17 @@
 const { Sequelize, DataTypes } = require('sequelize');
+const path = require('path');
 
-const sequelize = new Sequelize(process.env.DB_URI, {
-  dialect: 'postgres',
-  logging: false,
-});
+// Use SQLite if PostgreSQL is not available
+const sequelize = process.env.DB_URI
+  ? new Sequelize(process.env.DB_URI, {
+      dialect: 'postgres',
+      logging: false,
+    })
+  : new Sequelize({
+      dialect: 'sqlite',
+      storage: path.join(__dirname, '../../jobboard.db'),
+      logging: false,
+    });
 
 const User = sequelize.define('User', {
   email: { type: DataTypes.STRING, unique: true, allowNull: false },
