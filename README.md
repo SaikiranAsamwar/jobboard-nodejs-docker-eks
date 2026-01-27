@@ -45,7 +45,7 @@ Amazon ECR (Container Registry)
        ↓
 CodeDeploy (Blue/Green Deployment)
        ↓
-ECS Fargate (Container Orchestration)
+ECS on EC2 (Amazon Linux 2023)
        ↓
 Application Load Balancer
        ↓
@@ -55,7 +55,8 @@ Users
 **Infrastructure Components:**
 - VPC with public/private subnets
 - Application Load Balancer (ALB)
-- ECS Cluster with Fargate
+- ECS Cluster with EC2 instances (Amazon Linux 2023)
+- Auto Scaling Group for EC2 instances
 - RDS PostgreSQL Database
 - ECR Repositories
 - CloudWatch Logs
@@ -504,6 +505,45 @@ echo "Frontend Repository: $FRONTEND_REPO_URI"
 
 ### Step 3.6: Create IAM Roles
 
+#### ECS Instance Role (for EC2 instances)
+
+```bash
+# Create trust policy for EC2
+cat > ec2-trust-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "ec2.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+EOF
+
+# Create the role
+aws iam create-role \
+    --role-name ecsInstanceRole \
+    --assume-role-policy-document file://ec2-trust-policy.json
+
+# Attach AWS managed policy for ECS
+aws iam attach-role-policy \
+    --role-name ecsInstanceRole \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+# Create instance profile
+aws iam create-instance-profile \
+    --instance-profile-name ecsInstanceProfile
+
+# Add role to instance profile
+aws iam add-role-to-instance-profile \
+    --instance-profile-name ecsInstanceProfile \
+    --role-name ecsInstanceRole
+```
+
 #### ECS Task Execution Role
 
 ```bash
@@ -896,6 +936,74 @@ aws ecs create-cluster \
 # Verify cluster creation
 aws ecs describe-clusters \
     --clusters jobboard-cluster \
+    --region $AWS_REGION
+```
+
+### Step 3.10: Create EC2 Launch Template for ECS
+
+```bash
+# Get the latest Amazon Linux 2023 ECS-optimized AMI
+export ECS_AMI=$(aws ssm get-parameters \
+    --names /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id \
+    --query "Parameters[0].Value" \
+    --output text \
+    --region $AWS_REGION)
+
+echo "ECS AMI: $ECS_AMI"
+
+# Create user data script for ECS instances
+cat > user-data.txt << EOF
+#!/bin/bash
+echo ECS_CLUSTER=jobboard-cluster >> /etc/ecs/ecs.config
+echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
+echo ECS_ENABLE_TASK_IAM_ROLE=true >> /etc/ecs/ecs.config
+echo ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true >> /etc/ecs/ecs.config
+EOF
+  \"Value\": \"jobboard-ecs-instance\"
+            }]
+        }],
+        \"MetadataOptions\": {
+            \"HttpTokens\": \"required\",
+            \"HttpPutResponseHopLimit\": 2
+        }
+    }" \
+    --region $AWS_REGION
+
+# For Windows PowerShell, use this instead:
+# $userData = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes((Get-Content user-data.txt -Raw)))
+# Then replace the UserData value in the command above
+```
+
+### Step 3.11: Create Auto Scaling Group for ECS
+
+```bash
+# Create Auto Scaling Group
+aws autoscaling create-auto-scaling-group \
+    --auto-scaling-group-name jobboard-ecs-asg \
+    --launch-template "LaunchTemplateName=jobboard-ecs-launch-template,Version=\$Latest" \
+    --min-size 1 \
+    --max-size 3 \
+    --desired-capacity 2 \
+    --vpc-zone-identifier "$SUBNET_1,$SUBNET_2" \
+    --health-check-type ELB \
+    --health-check-grace-period 300 \
+    --tags "Key=Name,Value=jobboard-ecs-instance,PropagateAtLaunch=true" \
+    --region $AWS_REGION
+
+# Enable ECS managed scaling
+aws ecs put-cluster-capacity-providers \
+    --cluster jobboard-cluster \
+    --capacity-providers FARGATE FARGATE_SPOT \
+    --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
+    --region $AWS_REGION
+
+# Wait for instances to register with ECS cluster (takes 2-3 minutes)
+echo "Waiting for EC2 instances to register with ECS cluster..."
+sleep 180
+
+# Verify instances registered
+aws ecs list-container-instances \
+    --cluster jobboard-cluster \
     --region $AWS_REGION
 ```
 
@@ -1462,26 +1570,49 @@ aws ecs update-service \
     --service jobboard-service \
     --capacity-provider-strategy capacityProvider=FARGATE_SPOT,weight=1 \
     --region $AWS_REGION
-```
+```2 t3.small (2 instances, on-demand)**: ~$30/month
+- **EBS storage (2 x 30GB)**: ~$6/month
+- **RDS t3.micro**: ~$15/month
+- **ALB**: ~$18/month
+- **ECR storage**: ~$1/month (for 10GB)
+- **Data transfer**: Variable
+- **Total**: ~$70-80/month
 
-2. **Stop non-production resources**:
+### Cost Reduction Tips
+
+1. **Use EC2 Spot Instances** (for dev/test - up to 90% savings):
+```bash
+# Update launch template to use Spot instances
+aws ec2 create-launch-template-version \
+    --launch-template-name jobboard-ecs-launch-template \
+    --launch-template-data '{
+        "InstanceMarketOptions": {
+            "MarketType": "spot",
+            "SpotOptions": {
+3. **Stop non-production resources**:
 ```bash
 # Stop RDS during off-hours
 aws rds stop-db-instance \
     --db-instance-identifier jobboard-db \
     --region $AWS_REGION
 
-# Scale ECS service to 0
-aws ecs update-service \
-    --cluster jobboard-cluster \
-    --service jobboard-service \
-    --desired-count 0 \
+# Scale down ASG to 0
+aws autoscaling update-auto-scaling-group \
+    --auto-scaling-group-name jobboard-ecs-asg \
+    --min-size 0 \
+    --max-size 0 \
+    --desired-capacity 0 \
     --region $AWS_REGION
 ```
 
-3. **Clean up old ECR images**:
-```bash
-# Delete untagged images
+4``bash
+# Purchase 1-year reserved instance
+aws ec2 purchase-reserved-instances-offering \
+    --reserved-instances-offering-id <offering-id> \
+    --instance-count 2
+```
+
+3 Delete untagged images
 aws ecr batch-delete-image \
     --repository-name jobboard-backend \
     --image-ids imageTag=untagged \
@@ -1538,23 +1669,37 @@ aws ecs delete-service \
     --force \
     --region $AWS_REGION
 
-# 6. Deregister task definition
+# 6. Delete Auto Scaling Group
+aws autoscaling delete-auto-scaling-group \
+    --auto-scaling-group-name jobboard-ecs-asg \
+    --force-delete \
+    --region $AWS_REGION
+
+# Wait for instances to terminate
+sleep 60
+
+# 7. Delete Launch Template
+aws ec2 delete-launch-template \
+    --launch-template-name jobboard-ecs-launch-template \
+    --region $AWS_REGION
+
+# 8. Deregister task definition
 # (Tasks definitions can't be deleted, just deregister)
 aws ecs deregister-task-definition \
     --task-definition jobboard-task:1 \
     --region $AWS_REGION
 
-# 7. Delete ECS cluster
+# 9. Delete ECS cluster
 aws ecs delete-cluster \
     --cluster jobboard-cluster \
     --region $AWS_REGION
 
-# 8. Delete ALB listener
+# 11. Delete ALB listener
 aws elbv2 delete-listener \
     --listener-arn $LISTENER_ARN \
     --region $AWS_REGION
 
-# 9. Delete target groups
+# 12. Delete target groups
 aws elbv2 delete-target-group \
     --target-group-arn $TG_BLUE_ARN \
     --region $AWS_REGION
@@ -1563,7 +1708,7 @@ aws elbv2 delete-target-group \
     --target-group-arn $TG_GREEN_ARN \
     --region $AWS_REGION
 
-# 10. Delete ALB
+# 13. Delete ALB
 aws elbv2 delete-load-balancer \
     --load-balancer-arn $ALB_ARN \
     --region $AWS_REGION
