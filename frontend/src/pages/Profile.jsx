@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
+import PropTypes from 'prop-types';
 import './Profile.css';
 
-export default function Profile({ userEmail, userType, onLogout }) {
+function Profile({ userEmail, userType, onLogout }) {
   const [userData, setUserData] = useState(null);
-  const [applications, setApplications] = useState([]);
+  const [applications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [formData, setFormData] = useState({
@@ -122,14 +123,14 @@ export default function Profile({ userEmail, userType, onLogout }) {
               Member since {formatDate(userData?.createdAt)}
             </p>
             <div className="profile-actions">
-              {!editing ? (
+              {editing ? null : (
                 <button className="btn-edit-profile" onClick={() => setEditing(true)}>
                   <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                     <path d="M13 2l3 3-9 9H4v-3l9-9z" stroke="currentColor" strokeWidth="1.5"/>
                   </svg>
                   Edit Profile
                 </button>
-              ) : null}
+              )}
               <button className="btn-logout" onClick={onLogout}>
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
                   <path d="M7 16H3a2 2 0 01-2-2V4a2 2 0 012-2h4M12 12l4-4-4-4M16 8H7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -147,8 +148,9 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 <h2>Personal Information</h2>
                 
                 <div className="form-group">
-                  <label>Full Name</label>
+                  <label htmlFor="name">Full Name</label>
                   <input
+                    id="name"
                     type="text"
                     value={formData.name}
                     onChange={(e) => setFormData({ ...formData, name: e.target.value })}
@@ -157,8 +159,9 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 </div>
 
                 <div className="form-group">
-                  <label>Email Address</label>
+                  <label htmlFor="email">Email Address</label>
                   <input
+                    id="email"
                     type="email"
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
@@ -167,8 +170,9 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 </div>
 
                 <div className="form-group">
-                  <label>Phone Number</label>
+                  <label htmlFor="phone">Phone Number</label>
                   <input
+                    id="phone"
                     type="tel"
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
@@ -177,8 +181,9 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 </div>
 
                 <div className="form-group">
-                  <label>Location</label>
+                  <label htmlFor="location">Location</label>
                   <input
+                    id="location"
                     type="text"
                     value={formData.location}
                     onChange={(e) => setFormData({ ...formData, location: e.target.value })}
@@ -187,8 +192,9 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 </div>
 
                 <div className="form-group">
-                  <label>Bio</label>
+                  <label htmlFor="bio">Bio</label>
                   <textarea
+                    id="bio"
                     rows="4"
                     value={formData.bio}
                     onChange={(e) => setFormData({ ...formData, bio: e.target.value })}
@@ -213,32 +219,32 @@ export default function Profile({ userEmail, userType, onLogout }) {
                 
                 <div className="info-grid">
                   <div className="info-item">
-                    <label>Full Name</label>
+                    <span className="info-label">Full Name</span>
                     <p>{formData.name || 'Not provided'}</p>
                   </div>
 
                   <div className="info-item">
-                    <label>Email Address</label>
+                    <span className="info-label">Email Address</span>
                     <p>{formData.email}</p>
                   </div>
 
                   <div className="info-item">
-                    <label>Phone Number</label>
+                    <span className="info-label">Phone Number</span>
                     <p>{formData.phone || 'Not provided'}</p>
                   </div>
 
                   <div className="info-item">
-                    <label>Location</label>
+                    <span className="info-label">Location</span>
                     <p>{formData.location || 'Not provided'}</p>
                   </div>
 
                   <div className="info-item full-width">
-                    <label>Bio</label>
+                    <span className="info-label">Bio</span>
                     <p>{formData.bio || 'No bio added yet'}</p>
                   </div>
 
                   <div className="info-item">
-                    <label>Account Type</label>
+                    <span className="info-label">Account Type</span>
                     <p className="account-type">
                       <span className={`type-badge ${userType}`}>
                         {userType === 'recruiter' ? 'Recruiter Account' : 'Job Seeker Account'}
@@ -247,7 +253,7 @@ export default function Profile({ userEmail, userType, onLogout }) {
                   </div>
 
                   <div className="info-item">
-                    <label>Account Status</label>
+                    <span className="info-label">Account Status</span>
                     <p>
                       <span className="status-badge active">Active</span>
                     </p>
@@ -287,3 +293,11 @@ export default function Profile({ userEmail, userType, onLogout }) {
     </div>
   );
 }
+
+Profile.propTypes = {
+  userEmail: PropTypes.string.isRequired,
+  userType: PropTypes.string.isRequired,
+  onLogout: PropTypes.func.isRequired
+};
+
+export default Profile;
