@@ -534,6 +534,11 @@ aws iam attach-role-policy \
     --role-name ecsInstanceRole \
     --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
 
+# Attach CloudWatch agent policy for Container Insights
+aws iam attach-role-policy \
+    --role-name ecsInstanceRole \
+    --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
 # Create instance profile
 aws iam create-instance-profile \
     --instance-profile-name ecsInstanceProfile
@@ -925,17 +930,24 @@ export LISTENER_ARN=$(aws elbv2 describe-listeners \
     --region $AWS_REGION)
 ```
 
-### Step 3.9: Create ECS Cluster
+### Step 3.9: Create ECS Cluster with Container Insights
 
 ```bash
-# Create ECS cluster
+# Create ECS cluster with Container Insights enabled
 aws ecs create-cluster \
     --cluster-name jobboard-cluster \
+    --settings name=containerInsights,value=enabled \
     --region $AWS_REGION
 
 # Verify cluster creation
 aws ecs describe-clusters \
     --clusters jobboard-cluster \
+    --region $AWS_REGION
+
+# Verify Container Insights is enabled
+aws ecs describe-clusters \
+    --clusters jobboard-cluster \
+    --query "clusters[0].settings" \
     --region $AWS_REGION
 ```
 
@@ -1347,10 +1359,42 @@ aws elbv2 create-listener \
 
 ## Monitoring and Maintenance
 
+### CloudWatch Container Insights
+
+Container Insights provides comprehensive monitoring for your ECS cluster:
+
+**Access Container Insights:**
+1. Navigate to **CloudWatch** → **Container Insights** in AWS Console
+2. Select **ECS Clusters**
+3. View cluster-level metrics:
+   - CPU and Memory utilization
+   - Network traffic
+   - Storage usage
+   - Task and service counts
+
+**View Service Performance:**
+1. Select **ECS Services**
+2. Choose `jobboard-service`
+3. View detailed service metrics and performance maps
+
+**Container-Level Insights:**
+```bash
+# Query container insights metrics
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/ECS \
+    --metric-name CPUUtilization \
+    --dimensions Name=ClusterName,Value=jobboard-cluster Name=ServiceName,Value=jobboard-service \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Average \
+    --region $AWS_REGION
+```
+
 ### CloudWatch Logs
 
 ```bash
-# View logs
+# View logs in real-time
 aws logs tail /ecs/jobboard --follow --region $AWS_REGION
 
 # Filter logs for backend
@@ -1362,25 +1406,257 @@ aws logs tail /ecs/jobboard --follow \
 aws logs tail /ecs/jobboard --follow \
     --filter-pattern "frontend" \
     --region $AWS_REGION
+
+# View error logs only
+aws logs tail /ecs/jobboard --follow \
+    --filter-pattern "ERROR" \
+    --region $AWS_REGION
+```
+
+### CloudWatch Log Insights
+
+Use Log Insights for advanced log analysis:
+
+**Via AWS Console:**
+1. Navigate to **CloudWatch** → **Logs** → **Insights**
+2. Select log group `/ecs/jobboard`
+3. Run queries:
+
+**Query 1: Find all errors in last hour**
+```
+fields @timestamp, @message
+| filter @message like /ERROR/
+| sort @timestamp desc
+| limit 100
+```
+
+**Query 2: API response times**
+```
+fields @timestamp, @message
+| filter @message like /API/
+| parse @message "*ms" as responseTime
+| stats avg(responseTime), max(responseTime), min(responseTime) by bin(5m)
+```
+
+**Query 3: Count requests by endpoint**
+```
+fields @timestamp, @message
+| filter @message like /GET|POST|PUT|DELETE/
+| parse @message "* * *" as method, path, status
+| stats count() by path
+| sort count() desc
+```
+
+**Query 4: Database query performance**
+```
+fields @timestamp, @message
+| filter @message like /SQL|query/
+| parse @message "*ms" as queryTime
+| stats avg(queryTime) as avgTime, max(queryTime) as maxTime by bin(5m)
+```
+
+**Via CLI:**
+```bash
+# Start a query
+QUERY_ID=$(aws logs start-query \
+    --log-group-name /ecs/jobboard \
+    --start-time $(date -u -d '1 hour ago' +%s) \
+    --end-time $(date -u +%s) \
+    --query-string 'fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20' \
+    --query 'queryId' \
+    --output text \
+    --region $AWS_REGION)
+
+echo "Query ID: $QUERY_ID"
+
+# Wait a few seconds, then get results
+sleep 5
+
+# Get query results
+aws logs get-query-results \
+    --query-id $QUERY_ID \
+    --region $AWS_REGION
 ```
 
 ### CloudWatch Metrics
 
 **Via Console:**
-1. Navigate to **CloudWatch** → **Metrics**
+1. Navigate to **CloudWatch** → **Metrics** → **All metrics**
 2. Select **ECS** → **ClusterName, ServiceName**
 3. View metrics:
    - CPUUtilization
    - MemoryUtilization
    - TargetResponseTime
+   - RunningTaskCount
+   - PendingTaskCount
 
-### Set Up Alarms
+**Via CLI - Get Current Metrics:**
+```bash
+# Get CPU utilization
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/ECS \
+    --metric-name CPUUtilization \
+    --dimensions Name=ClusterName,Value=jobboard-cluster Name=ServiceName,Value=jobboard-service \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Average,Maximum \
+    --region $AWS_REGION
+
+# Get memory utilization
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/ECS \
+    --metric-name MemoryUtilization \
+    --dimensions Name=ClusterName,Value=jobboard-cluster Name=ServiceName,Value=jobboard-service \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Average,Maximum \
+    --region $AWS_REGION
+
+# Get ALB metrics
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/ApplicationELB \
+    --metric-name TargetResponseTime \
+    --dimensions Name=LoadBalancer,Value=app/jobboard-alb/<alb-id> \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Average \
+    --region $AWS_REGION
+
+# Get RDS metrics
+aws cloudwatch get-metric-statistics \
+    --namespace AWS/RDS \
+    --metric-name CPUUtilization \
+    --dimensions Name=DBInstanceIdentifier,Value=jobboard-db \
+    --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 300 \
+    --statistics Average \
+    --region $AWS_REGION
+```
+
+### Create CloudWatch Dashboard
 
 ```bash
-# Create CPU alarm
+# Create comprehensive monitoring dashboard
+cat > dashboard.json << EOF
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/ECS", "CPUUtilization", {"stat": "Average", "label": "CPU Average"}],
+          ["...", {"stat": "Maximum", "label": "CPU Max"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "$AWS_REGION",
+        "title": "ECS CPU Utilization",
+        "period": 300,
+        "dimensions": {
+          "ClusterName": "jobboard-cluster",
+          "ServiceName": "jobboard-service"
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/ECS", "MemoryUtilization", {"stat": "Average"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "$AWS_REGION",
+        "title": "ECS Memory Utilization",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/ApplicationELB", "RequestCount", {"stat": "Sum"}],
+          [".", "TargetResponseTime", {"stat": "Average", "yAxis": "right"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "$AWS_REGION",
+        "title": "ALB Requests & Response Time",
+        "period": 300,
+        "yAxis": {
+          "left": {"label": "Requests"},
+          "right": {"label": "Response Time (s)"}
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "properties": {
+        "metrics": [
+          ["AWS/RDS", "CPUUtilization", {"stat": "Average"}],
+          [".", "DatabaseConnections", {"stat": "Sum", "yAxis": "right"}]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "$AWS_REGION",
+        "title": "RDS Performance",
+        "period": 300,
+        "dimensions": {
+          "DBInstanceIdentifier": "jobboard-db"
+        }
+      }
+    },
+    {
+      "type": "log",
+      "properties": {
+        "query": "SOURCE '/ecs/jobboard' | fields @timestamp, @message | filter @message like /ERROR/ | sort @timestamp desc | limit 20",
+        "region": "$AWS_REGION",
+        "title": "Recent Errors",
+        "stacked": false
+      }
+    }
+  ]
+}
+EOF
+
+# Create the dashboard
+aws cloudwatch put-dashboard \
+    --dashboard-name JobBoard-Monitoring \
+    --dashboard-body file://dashboard.json \
+    --region $AWS_REGION
+
+echo "Dashboard created: https://console.aws.amazon.com/cloudwatch/home?region=$AWS_REGION#dashboards:name=JobBoard-Monitoring"
+```
+
+### Set Up CloudWatch Alarms
+
+```bash
+# Create SNS topic for alarm notifications
+SNS_TOPIC_ARN=$(aws sns create-topic \
+    --name jobboard-alerts \
+    --query 'TopicArn' \
+    --output text \
+    --region $AWS_REGION)
+
+echo "SNS Topic ARN: $SNS_TOPIC_ARN"
+
+# Subscribe your email to SNS topic
+aws sns subscribe \
+    --topic-arn $SNS_TOPIC_ARN \
+    --protocol email \
+    --notification-endpoint your-email@example.com \
+    --region $AWS_REGION
+
+echo "Check your email to confirm the subscription!"
+
+# 1. ECS CPU High Alarm
 aws cloudwatch put-metric-alarm \
-    --alarm-name jobboard-high-cpu \
-    --alarm-description "Alert when CPU exceeds 80%" \
+    --alarm-name jobboard-ecs-high-cpu \
+    --alarm-description "Alert when ECS CPU exceeds 80%" \
     --metric-name CPUUtilization \
     --namespace AWS/ECS \
     --statistic Average \
@@ -1389,6 +1665,135 @@ aws cloudwatch put-metric-alarm \
     --comparison-operator GreaterThanThreshold \
     --dimensions Name=ServiceName,Value=jobboard-service Name=ClusterName,Value=jobboard-cluster \
     --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 2. ECS Memory High Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-ecs-high-memory \
+    --alarm-description "Alert when ECS Memory exceeds 80%" \
+    --metric-name MemoryUtilization \
+    --namespace AWS/ECS \
+    --statistic Average \
+    --period 300 \
+    --threshold 80 \
+    --comparison-operator GreaterThanThreshold \
+    --dimensions Name=ServiceName,Value=jobboard-service Name=ClusterName,Value=jobboard-cluster \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 3. ALB Unhealthy Targets Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-alb-unhealthy-targets \
+    --alarm-description "Alert when ALB has unhealthy targets" \
+    --metric-name UnHealthyHostCount \
+    --namespace AWS/ApplicationELB \
+    --statistic Average \
+    --period 60 \
+    --threshold 1 \
+    --comparison-operator GreaterThanOrEqualToThreshold \
+    --dimensions Name=TargetGroup,Value=targetgroup/jobboard-tg-blue/* Name=LoadBalancer,Value=app/jobboard-alb/* \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 4. ALB High Response Time Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-alb-high-response-time \
+    --alarm-description "Alert when response time exceeds 2 seconds" \
+    --metric-name TargetResponseTime \
+    --namespace AWS/ApplicationELB \
+    --statistic Average \
+    --period 300 \
+    --threshold 2 \
+    --comparison-operator GreaterThanThreshold \
+    --dimensions Name=LoadBalancer,Value=app/jobboard-alb/* \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 5. ALB 5XX Errors Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-alb-5xx-errors \
+    --alarm-description "Alert on high 5XX error rate" \
+    --metric-name HTTPCode_Target_5XX_Count \
+    --namespace AWS/ApplicationELB \
+    --statistic Sum \
+    --period 300 \
+    --threshold 10 \
+    --comparison-operator GreaterThanThreshold \
+    --dimensions Name=LoadBalancer,Value=app/jobboard-alb/* \
+    --evaluation-periods 1 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --treat-missing-data notBreaching \
+    --region $AWS_REGION
+
+# 6. RDS High CPU Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-rds-high-cpu \
+    --alarm-description "Alert when RDS CPU exceeds 80%" \
+    --metric-name CPUUtilization \
+    --namespace AWS/RDS \
+    --statistic Average \
+    --period 300 \
+    --threshold 80 \
+    --comparison-operator GreaterThanThreshold \
+    --dimensions Name=DBInstanceIdentifier,Value=jobboard-db \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 7. RDS Low Storage Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-rds-low-storage \
+    --alarm-description "Alert when RDS free storage is below 2GB" \
+    --metric-name FreeStorageSpace \
+    --namespace AWS/RDS \
+    --statistic Average \
+    --period 300 \
+    --threshold 2000000000 \
+    --comparison-operator LessThanThreshold \
+    --dimensions Name=DBInstanceIdentifier,Value=jobboard-db \
+    --evaluation-periods 1 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 8. RDS High Connections Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-rds-high-connections \
+    --alarm-description "Alert when database connections are high" \
+    --metric-name DatabaseConnections \
+    --namespace AWS/RDS \
+    --statistic Average \
+    --period 300 \
+    --threshold 80 \
+    --comparison-operator GreaterThanThreshold \
+    --dimensions Name=DBInstanceIdentifier,Value=jobboard-db \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# 9. ECS Service Task Count Low Alarm
+aws cloudwatch put-metric-alarm \
+    --alarm-name jobboard-ecs-low-task-count \
+    --alarm-description "Alert when running tasks drop below desired count" \
+    --metric-name RunningTaskCount \
+    --namespace ECS/ContainerInsights \
+    --statistic Average \
+    --period 60 \
+    --threshold 1 \
+    --comparison-operator LessThanThreshold \
+    --dimensions Name=ServiceName,Value=jobboard-service Name=ClusterName,Value=jobboard-cluster \
+    --evaluation-periods 2 \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --region $AWS_REGION
+
+# List all created alarms
+aws cloudwatch describe-alarms \
+    --alarm-name-prefix jobboard \
+    --query 'MetricAlarms[*].[AlarmName,StateValue]' \
+    --output table \
     --region $AWS_REGION
 ```
 
@@ -1404,18 +1809,40 @@ aws application-autoscaling register-scalable-target \
     --max-capacity 4 \
     --region $AWS_REGION
 
-# Create scaling policy
+# Create CPU-based scaling policy
 aws application-autoscaling put-scaling-policy \
     --service-namespace ecs \
     --resource-id service/jobboard-cluster/jobboard-service \
     --scalable-dimension ecs:service:DesiredCount \
     --policy-name jobboard-cpu-scaling \
     --policy-type TargetTrackingScaling \
-    --target-tracking-scaling-policy-configuration file://scaling-policy.json \
+    --target-tracking-scaling-policy-configuration file://cpu-scaling-policy.json \
+    --region $AWS_REGION
+
+# Create Memory-based scaling policy
+aws application-autoscaling put-scaling-policy \
+    --service-namespace ecs \
+    --resource-id service/jobboard-cluster/jobboard-service \
+    --scalable-dimension ecs:service:DesiredCount \
+    --policy-name jobboard-memory-scaling \
+    --policy-type TargetTrackingScaling \
+    --target-tracking-scaling-policy-configuration file://memory-scaling-policy.json \
+    --region $AWS_REGION
+
+# Create ALB request-based scaling policy
+aws application-autoscaling put-scaling-policy \
+    --service-namespace ecs \
+    --resource-id service/jobboard-cluster/jobboard-service \
+    --scalable-dimension ecs:service:DesiredCount \
+    --policy-name jobboard-request-scaling \
+    --policy-type TargetTrackingScaling \
+    --target-tracking-scaling-policy-configuration file://request-scaling-policy.json \
     --region $AWS_REGION
 ```
 
-Create `scaling-policy.json`:
+Create scaling policy files:
+
+**cpu-scaling-policy.json:**
 ```json
 {
   "TargetValue": 70.0,
@@ -1425,6 +1852,106 @@ Create `scaling-policy.json`:
   "ScaleInCooldown": 300,
   "ScaleOutCooldown": 60
 }
+```
+
+**memory-scaling-policy.json:**
+```json
+{
+  "TargetValue": 80.0,
+  "PredefinedMetricSpecification": {
+    "PredefinedMetricType": "ECSServiceAverageMemoryUtilization"
+  },
+  "ScaleInCooldown": 300,
+  "ScaleOutCooldown": 60
+}
+```
+
+**request-scaling-policy.json:**
+```json
+{
+  "TargetValue": 1000.0,
+  "PredefinedMetricSpecification": {
+    "PredefinedMetricType": "ALBRequestCountPerTarget",
+    "ResourceLabel": "app/jobboard-alb/<alb-id>/targetgroup/jobboard-tg-blue/<tg-id>"
+  },
+  "ScaleInCooldown": 300,
+  "ScaleOutCooldown": 60
+}
+```
+
+### Performance Monitoring Best Practices
+
+1. **Set up CloudWatch Anomaly Detection:**
+```bash
+# Enable anomaly detection for CPU
+aws cloudwatch put-anomaly-detector \
+    --namespace AWS/ECS \
+    --metric-name CPUUtilization \
+    --dimensions Name=ClusterName,Value=jobboard-cluster Name=ServiceName,Value=jobboard-service \
+    --stat Average \
+    --region $AWS_REGION
+```
+
+2. **Create composite alarms** (requires existing alarms):
+```bash
+# Create composite alarm for critical service health
+aws cloudwatch put-composite-alarm \
+    --alarm-name jobboard-service-critical \
+    --alarm-description \"Critical: Multiple service health issues detected\" \
+    --actions-enabled \
+    --alarm-actions $SNS_TOPIC_ARN \
+    --alarm-rule \"ALARM(jobboard-ecs-high-cpu) OR ALARM(jobboard-ecs-high-memory) OR ALARM(jobboard-alb-unhealthy-targets)\" \
+    --region $AWS_REGION
+```
+
+3. **Enable detailed monitoring for EC2 instances:**
+```bash
+# Enable detailed monitoring (1-minute metrics instead of 5-minute)
+aws ec2 monitor-instances \
+    --instance-ids <instance-id> \
+    --region $AWS_REGION
+```
+
+4. **Set up custom metrics** (from application code):
+
+Add to your backend application:
+```javascript
+// backend/src/monitoring.js
+const AWS = require('aws-sdk');
+const cloudwatch = new AWS.CloudWatch({ region: process.env.AWS_REGION });
+
+async function publishCustomMetric(metricName, value, unit = 'Count') {
+  const params = {
+    Namespace: 'JobBoard/Application',
+    MetricData: [{
+      MetricName: metricName,
+      Value: value,
+      Unit: unit,
+      Timestamp: new Date()
+    }]
+  };
+  
+  try {
+    await cloudwatch.putMetricData(params).promise();
+  } catch (error) {
+    console.error('Error publishing metric:', error);
+  }
+}
+
+module.exports = { publishCustomMetric };
+```
+
+5. **Monitor application-level metrics:**
+```bash
+# Query custom metrics
+aws cloudwatch get-metric-statistics \
+    --namespace JobBoard/Application \
+    --metric-name JobApplications \
+    --start-time $(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S) \
+    --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+    --period 3600 \
+    --statistics Sum \
+    --region $AWS_REGION
 ```
 
 ---
@@ -1898,11 +2425,13 @@ For issues or questions:
 - [ ] Create RDS database
 - [ ] Store secrets in Secrets Manager
 - [ ] Create ECR repositories
-- [ ] Create IAM roles
+- [ ] Create IAM roles (including ECS Instance Role)
 - [ ] Create CloudWatch log group
 - [ ] Create Application Load Balancer
-- [ ] Create ECS cluster
-- [ ] Update configuration files (taskdef.json, appspec.yaml)
+- [ ] Create ECS cluster with Container Insights enabled
+- [ ] Create EC2 Launch Template with ECS-optimized Amazon Linux 2023
+- [ ] Create Auto Scaling Group for ECS instances
+- [ ] Update configuration files (taskdef.json)
 - [ ] Register ECS task definition
 - [ ] Create ECS service
 - [ ] Create S3 bucket for pipeline artifacts
@@ -1913,6 +2442,10 @@ For issues or questions:
 - [ ] Monitor pipeline execution
 - [ ] Verify deployment
 - [ ] Test application
+- [ ] Set up CloudWatch Dashboard
+- [ ] Configure CloudWatch Alarms
+- [ ] Subscribe to SNS notifications
+- [ ] Enable auto-scaling policies
 
 ---
 
